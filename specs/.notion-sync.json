@@ -1,0 +1,10 @@
+{
+  "data_source_id": "399f5dd0-dc1a-8084-9363-000bc16b30fd",
+  "title_property": "문서 이름",
+  "specs_dir": "features",
+  "mappings": {
+    "이메일 인증 기능.md": {
+      "page_id": "396f5dd0-dc1a-81d2-868d-d757eb30432c"
+    }
+  }
+}

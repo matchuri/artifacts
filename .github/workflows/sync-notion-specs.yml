@@ -1,0 +1,51 @@
+name: Sync feature specs to Notion
+
+on:
+  pull_request:
+    paths:
+      - "specs/**"
+      - "scripts/sync_notion_specs.py"
+      - "tests/test_sync_notion_specs.py"
+      - ".github/workflows/sync-notion-specs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "specs/**"
+      - "scripts/sync_notion_specs.py"
+      - "tests/test_sync_notion_specs.py"
+      - ".github/workflows/sync-notion-specs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notion-spec-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate feature specs
+        run: python scripts/sync_notion_specs.py validate
+      - name: Run sync tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+  sync:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync feature specs
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: python scripts/sync_notion_specs.py sync
