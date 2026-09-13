@@ -24,6 +24,11 @@
 
 ## 참고
 
-- 관련 API: `POST /api/v1/auth/email`, `POST /api/v1/auth/email/confirm`, `POST /api/v1/auth/recovery/login-id`
-- 관련 데이터: `members`, `auth_email_verifications`
+- 관련 API
+  - `POST /api/v1/auth/email`
+  - `POST /api/v1/auth/email/confirm`
+  - `POST /api/v1/auth/recovery/login-id`
+- 관련 데이터
+  - `members`
+  - `auth_email_verifications`
 - 미정 사항: 소셜 전용 계정 안내 문구, 결과 화면에서 로그인으로 돌아가는 UX, 복수 계정 정책
