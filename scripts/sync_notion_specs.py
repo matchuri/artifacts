@@ -182,7 +182,7 @@ def normalize_markdown(value: str) -> str:
 
 def comparison_lines(value: str) -> list[str]:
     return [
-        line.rstrip()
+        line.expandtabs(2).rstrip()
         for line in normalize_markdown(value).splitlines()
         if line.strip() and line.strip() != "<empty-block/>"
     ]

@@ -38,6 +38,11 @@ class MarkdownTests(unittest.TestCase):
         remote = VALID_MARKDOWN.replace("\n\n", "\n<empty-block/>\n")
         self.assertTrue(sync.markdown_equal(VALID_MARKDOWN, remote))
 
+    def test_notions_tab_indentation_matches_two_space_nested_lists(self) -> None:
+        local = "- 관련 API\n  - `GET /api/v1/example`\n"
+        remote = "- 관련 API\n\t- `GET /api/v1/example`\n"
+        self.assertTrue(sync.markdown_equal(local, remote))
+
     def test_title_and_template_validate(self) -> None:
         path = Path("이메일 인증 기능.md")
         self.assertEqual("이메일 인증 기능", sync.validate_markdown(path, VALID_MARKDOWN))
