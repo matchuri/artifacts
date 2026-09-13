@@ -23,5 +23,6 @@
 
 ```powershell
 python scripts\sync_notion_specs.py validate
+python scripts\sync_notion_specs.py format
 python -m unittest discover -s tests -p "test_*.py"
 ```

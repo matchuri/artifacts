@@ -16,6 +16,7 @@ Matchuri의 상세 기능 동작, 수용 기준, 엣지케이스를 관리합니
 
 ```powershell
 python scripts\sync_notion_specs.py validate
+python scripts\sync_notion_specs.py format
 python -m unittest discover -s tests -p "test_*.py"
 ```
 

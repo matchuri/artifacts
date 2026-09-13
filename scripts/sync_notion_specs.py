@@ -199,6 +199,34 @@ def title_from_markdown(path: Path, markdown: str) -> str:
     raise SyncError(f"H1 제목이 없습니다: {path}")
 
 
+def expandable_reference_line(line: str) -> tuple[str, list[str]] | None:
+    if not line.startswith("- ") or ": " not in line:
+        return None
+    label, value = line[2:].split(": ", 1)
+    if label != "관련 데이터" and not label.endswith("API"):
+        return None
+    items = [item.strip() for item in value.split(", ") if item.strip()]
+    return label, items
+
+
+def format_reference_section(markdown: str) -> str:
+    lines = normalize_markdown(markdown).splitlines()
+    try:
+        reference_index = lines.index("## 참고")
+    except ValueError:
+        return normalize_markdown(markdown)
+    formatted = lines[: reference_index + 1]
+    for line in lines[reference_index + 1 :]:
+        expandable = expandable_reference_line(line)
+        if expandable is None:
+            formatted.append(line)
+            continue
+        label, items = expandable
+        formatted.append(f"- {label}")
+        formatted.extend(f"  - {item}" for item in items)
+    return "\n".join(formatted).strip() + "\n"
+
+
 def validate_markdown(path: Path, markdown: str) -> str:
     title = title_from_markdown(path, markdown)
     if not title:
@@ -216,6 +244,10 @@ def validate_markdown(path: Path, markdown: str) -> str:
         positions.append(lines.index(heading))
     if positions != sorted(positions) or len(set(positions)) != len(positions):
         raise SyncError(f"필수 섹션 순서가 올바르지 않습니다: {path}")
+    reference_index = lines.index("## 참고")
+    for line in normalize_markdown(markdown).splitlines()[reference_index + 1 :]:
+        if expandable_reference_line(line):
+            raise SyncError(f"참고 항목은 하위 목록으로 줄바꿈해야 합니다: {path}: {line}")
     return title
 
 
@@ -254,6 +286,17 @@ def validate_specs(paths: Iterable[Path]) -> dict[Path, str]:
         titles[title] = path
         validated[path] = title
     return validated
+
+
+def format_specs(paths: Iterable[Path]) -> int:
+    changed = 0
+    for path in paths:
+        before = path.read_text(encoding="utf-8")
+        after = format_reference_section(before)
+        if after != normalize_markdown(before):
+            path.write_text(after, encoding="utf-8")
+            changed += 1
+    return changed
 
 
 def validate_remote_schema(client: NotionClient, config: dict[str, Any]) -> None:
@@ -411,6 +454,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate")
+    subparsers.add_parser("format")
     for command in ("plan", "sync", "bind"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument(
@@ -435,6 +479,11 @@ def main() -> int:
         specs_dir = specs_directory(config_path, config)
         selectors = getattr(args, "spec", None)
         selected = select_specs(specs_dir, selectors)
+        if args.command == "format":
+            changed = format_specs(selected)
+            validated = validate_specs(selected)
+            print(json.dumps({"status": "formatted", "changed": changed, "specs": len(validated)}, ensure_ascii=False))
+            return 0
         validated = validate_specs(selected)
         if args.command == "validate":
             print(json.dumps({"status": "valid", "specs": len(validated)}, ensure_ascii=False))

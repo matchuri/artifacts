@@ -54,6 +54,21 @@ class MarkdownTests(unittest.TestCase):
         ratio = sync.difflib.SequenceMatcher(None, "그룹 목록 및 생성 기능", "그룹 목록 조회 및 생성 기능").ratio()
         self.assertGreaterEqual(ratio, sync.SIMILAR_TITLE_THRESHOLD)
 
+    def test_reference_api_and_data_are_formatted_as_nested_lists(self) -> None:
+        compact = VALID_MARKDOWN.replace(
+            "- 참고",
+            "- 관련 API: `GET /one`, `POST /two`\n- 관련 데이터: `first`, `second`\n- 미정 사항: 유지",
+        )
+        formatted = sync.format_reference_section(compact)
+        self.assertIn("- 관련 API\n  - `GET /one`\n  - `POST /two`", formatted)
+        self.assertIn("- 관련 데이터\n  - `first`\n  - `second`", formatted)
+        self.assertIn("- 미정 사항: 유지", formatted)
+
+    def test_compact_reference_list_fails_validation(self) -> None:
+        compact = VALID_MARKDOWN.replace("- 참고", "- 관련 API: `GET /one`, `POST /two`")
+        with self.assertRaises(sync.SyncError):
+            sync.validate_markdown(Path("이메일 인증 기능.md"), compact)
+
     def test_duplicate_titles_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "first.md"
