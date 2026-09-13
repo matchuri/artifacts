@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ NOTION_VERSION = "2026-03-11"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "specs" / ".notion-sync.json"
 REQUIRED_HEADINGS = ("## 설명", "## 수용 기준", "## 엣지케이스", "## 참고")
+SIMILAR_TITLE_THRESHOLD = 0.88
 
 
 class SyncError(RuntimeError):
@@ -73,6 +75,9 @@ class NotionClient:
     def retrieve_data_source(self, data_source_id: str) -> dict[str, Any]:
         return self.request("GET", f"/data_sources/{data_source_id}")
 
+    def retrieve_page(self, page_id: str) -> dict[str, Any]:
+        return self.request("GET", f"/pages/{page_id}")
+
     def find_pages(self, data_source_id: str, title_property: str, title: str) -> list[dict[str, Any]]:
         response = self.request(
             "POST",
@@ -80,6 +85,21 @@ class NotionClient:
             {"page_size": 100, "filter": {"property": title_property, "title": {"equals": title}}},
         )
         return [item for item in response.get("results", []) if item.get("object") == "page"]
+
+    def list_pages(self, data_source_id: str) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            payload: dict[str, Any] = {"page_size": 100}
+            if cursor:
+                payload["start_cursor"] = cursor
+            response = self.request("POST", f"/data_sources/{data_source_id}/query", payload)
+            pages.extend(item for item in response.get("results", []) if item.get("object") == "page")
+            if not response.get("has_more"):
+                return pages
+            cursor = response.get("next_cursor")
+            if not cursor:
+                raise SyncError("Notion 페이지 목록의 다음 cursor가 없습니다.")
 
     def retrieve_markdown(self, page_id: str) -> str:
         response = self.request("GET", f"/pages/{page_id}/markdown")
@@ -95,6 +115,20 @@ class NotionClient:
                 "type": "replace_content",
                 "replace_content": {"new_str": markdown},
                 "allow_async": False,
+            },
+        )
+
+    def update_title(self, page_id: str, title_property: str, title: str) -> None:
+        self.request(
+            "PATCH",
+            f"/pages/{page_id}",
+            {
+                "properties": {
+                    title_property: {
+                        "type": "title",
+                        "title": [{"type": "text", "text": {"content": title}}],
+                    }
+                }
             },
         )
 
@@ -133,6 +167,10 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def save_config(path: Path, config: dict[str, Any]) -> None:
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def specs_directory(config_path: Path, config: dict[str, Any]) -> Path:
     value = Path(config["specs_dir"])
     return (value if value.is_absolute() else config_path.parent / value).resolve()
@@ -165,6 +203,8 @@ def validate_markdown(path: Path, markdown: str) -> str:
     title = title_from_markdown(path, markdown)
     if not title:
         raise SyncError(f"H1 제목이 비어 있습니다: {path}")
+    if title != path.stem:
+        raise SyncError(f"파일명과 H1 제목이 다릅니다: {path.name!r} != {title!r}")
     lines = [line.strip() for line in normalize_markdown(markdown).splitlines()]
     positions: list[int] = []
     for heading in REQUIRED_HEADINGS:
@@ -223,16 +263,39 @@ def validate_remote_schema(client: NotionClient, config: dict[str, Any]) -> None
         raise SyncError(f"Notion 속성 {title_property!r}이 title 타입이 아닙니다.")
 
 
+def page_title(page: dict[str, Any], title_property: str) -> str:
+    title_items = page.get("properties", {}).get(title_property, {}).get("title", [])
+    return "".join(item.get("plain_text") or item.get("text", {}).get("content", "") for item in title_items)
+
+
+def similar_pages(
+    client: NotionClient,
+    config: dict[str, Any],
+    title: str,
+) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    for page in client.list_pages(config["data_source_id"]):
+        remote_title = page_title(page, config["title_property"])
+        if not remote_title or remote_title == title or page.get("in_trash") or page.get("archived"):
+            continue
+        ratio = difflib.SequenceMatcher(None, title, remote_title).ratio()
+        if ratio >= SIMILAR_TITLE_THRESHOLD:
+            candidates.append({"id": page["id"], "title": remote_title})
+    return candidates
+
+
 def find_page(
     client: NotionClient,
     config: dict[str, Any],
     relative_path: str,
     title: str,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, str]:
     page_id = config["mappings"].get(relative_path, {}).get("page_id")
     if page_id:
         try:
-            return page_id, client.retrieve_markdown(page_id)
+            page = client.retrieve_page(page_id)
+            if not page.get("in_trash") and not page.get("archived"):
+                return page_id, client.retrieve_markdown(page_id), page_title(page, config["title_property"])
         except NotionApiError as exc:
             if exc.status != 404:
                 raise
@@ -240,9 +303,32 @@ def find_page(
     if len(pages) > 1:
         raise SyncError(f"제목이 같은 Notion 페이지가 여러 개입니다: {title}")
     if not pages:
-        return None, ""
+        return None, "", ""
     page_id = pages[0]["id"]
-    return page_id, client.retrieve_markdown(page_id)
+    return page_id, client.retrieve_markdown(page_id), page_title(pages[0], config["title_property"])
+
+
+def bind_spec(
+    client: NotionClient,
+    config_path: Path,
+    config: dict[str, Any],
+    specs_dir: Path,
+    path: Path,
+    remote_title: str,
+) -> int:
+    validate_remote_schema(client, config)
+    pages = client.find_pages(config["data_source_id"], config["title_property"], remote_title)
+    if len(pages) != 1:
+        raise SyncError(f"Notion 제목 {remote_title!r}의 활성 페이지가 {len(pages)}개입니다. 정확히 1개여야 합니다.")
+    relative_path = path.relative_to(specs_dir).as_posix()
+    page_id = pages[0]["id"]
+    for mapped_path, mapping in list(config["mappings"].items()):
+        if mapped_path != relative_path and mapping.get("page_id") == page_id:
+            del config["mappings"][mapped_path]
+    config["mappings"][relative_path] = {"page_id": page_id}
+    save_config(config_path, config)
+    print(json.dumps({"command": "bind", "spec": relative_path, "page_id": page_id}, ensure_ascii=False))
+    return 0
 
 
 def notion_client_from_environment() -> NotionClient:
@@ -258,6 +344,7 @@ def run_remote(
     config: dict[str, Any],
     specs_dir: Path,
     validated: dict[Path, str],
+    allow_create: bool = False,
 ) -> int:
     validate_remote_schema(client, config)
     changes = 0
@@ -265,24 +352,51 @@ def run_remote(
     for path, title in validated.items():
         relative_path = path.relative_to(specs_dir).as_posix()
         local = path.read_text(encoding="utf-8")
-        page_id, remote = find_page(client, config, relative_path, title)
+        page_id, remote, remote_title = find_page(client, config, relative_path, title)
+        candidates = similar_pages(client, config, title) if page_id is None else []
         if command == "plan":
-            status = "missing_remote" if page_id is None else "in_sync" if markdown_equal(local, remote) else "update_required"
+            if candidates:
+                status = "possible_rename"
+            elif page_id is None:
+                status = "missing_remote"
+            elif remote_title != title or not markdown_equal(local, remote):
+                status = "update_required"
+            else:
+                status = "in_sync"
             changes += status != "in_sync"
-            results.append({"spec": relative_path, "status": status})
+            result: dict[str, Any] = {"spec": relative_path, "status": status}
+            if candidates:
+                result["candidates"] = candidates
+            results.append(result)
             continue
 
         if page_id is None:
+            if candidates and not allow_create:
+                names = ", ".join(candidate["title"] for candidate in candidates)
+                raise SyncError(f"유사한 Notion 페이지가 있어 자동 생성을 중단했습니다: {title} -> {names}")
             page_id = client.create_page(
                 config["data_source_id"], config["title_property"], title, normalize_markdown(local)
             )
             status = "created"
-        elif markdown_equal(local, remote):
-            status = "unchanged"
         else:
-            client.replace_markdown(page_id, normalize_markdown(local))
-            status = "updated"
-        verified = markdown_equal(client.retrieve_markdown(page_id), local)
+            title_changed = remote_title != title
+            content_changed = not markdown_equal(local, remote)
+            if title_changed:
+                client.update_title(page_id, config["title_property"], title)
+            if content_changed:
+                client.replace_markdown(page_id, normalize_markdown(local))
+            if title_changed and content_changed:
+                status = "renamed_and_updated"
+            elif title_changed:
+                status = "renamed"
+            elif content_changed:
+                status = "updated"
+            else:
+                status = "unchanged"
+        verified_page = client.retrieve_page(page_id)
+        verified = markdown_equal(client.retrieve_markdown(page_id), local) and page_title(
+            verified_page, config["title_property"]
+        ) == title
         if not verified:
             raise SyncError(f"Notion 반영 검증에 실패했습니다: {relative_path}")
         changes += status != "unchanged"
@@ -297,9 +411,22 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate")
-    for command in ("plan", "sync"):
+    for command in ("plan", "sync", "bind"):
         command_parser = subparsers.add_parser(command)
-        command_parser.add_argument("--spec", action="append", help="기능명세 이름 또는 .md 경로; 반복 가능")
+        command_parser.add_argument(
+            "--spec",
+            action="append",
+            required=command == "bind",
+            help="기능명세 이름 또는 .md 경로; 반복 가능",
+        )
+        if command == "sync":
+            command_parser.add_argument(
+                "--allow-create",
+                action="store_true",
+                help="유사 제목 후보가 있어도 새 Notion 페이지 생성을 허용",
+            )
+        if command == "bind":
+            command_parser.add_argument("--remote-title", required=True, help="연결할 기존 Notion 페이지 제목")
     args = parser.parse_args()
 
     try:
@@ -312,7 +439,20 @@ def main() -> int:
         if args.command == "validate":
             print(json.dumps({"status": "valid", "specs": len(validated)}, ensure_ascii=False))
             return 0
-        return run_remote(args.command, notion_client_from_environment(), config, specs_dir, validated)
+        client = notion_client_from_environment()
+        if args.command == "bind":
+            if len(validated) != 1:
+                raise SyncError("bind는 --spec 하나만 지정해야 합니다.")
+            path = next(iter(validated))
+            return bind_spec(client, config_path, config, specs_dir, path, args.remote_title)
+        return run_remote(
+            args.command,
+            client,
+            config,
+            specs_dir,
+            validated,
+            allow_create=getattr(args, "allow_create", False),
+        )
     except (OSError, UnicodeError, SyncError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

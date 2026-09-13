@@ -46,6 +46,14 @@ class MarkdownTests(unittest.TestCase):
         with self.assertRaises(sync.SyncError):
             sync.validate_markdown(Path("broken.md"), VALID_MARKDOWN.replace("## 엣지케이스", "## 예외"))
 
+    def test_filename_and_h1_must_match(self) -> None:
+        with self.assertRaises(sync.SyncError):
+            sync.validate_markdown(Path("그룹 목록 조회 및 생성 기능.md"), VALID_MARKDOWN)
+
+    def test_problematic_rename_is_similar_enough_to_block_creation(self) -> None:
+        ratio = sync.difflib.SequenceMatcher(None, "그룹 목록 및 생성 기능", "그룹 목록 조회 및 생성 기능").ratio()
+        self.assertGreaterEqual(ratio, sync.SIMILAR_TITLE_THRESHOLD)
+
     def test_duplicate_titles_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "first.md"
