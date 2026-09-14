@@ -43,6 +43,43 @@ class MarkdownTests(unittest.TestCase):
         remote = "- 관련 API\n\t- `GET /api/v1/example`\n"
         self.assertTrue(sync.markdown_equal(local, remote))
 
+    def test_notion_markdown_escapes_literal_tilde(self) -> None:
+        local = "- 점수는 0~100이고 후보는 0~3개입니다.\n"
+        self.assertEqual(
+            "- 점수는 0\\~100이고 후보는 0\\~3개입니다.\n",
+            sync.to_notion_markdown(local),
+        )
+
+    def test_notion_markdown_preserves_escaped_tilde_and_markdown_code(self) -> None:
+        local = """- 이미 0\\~100으로 이스케이프했습니다.
+- `0~100`은 코드입니다.
+- ~~제외된 문장~~입니다.
+
+```text
+0~100
+```
+"""
+        self.assertEqual(local, sync.to_notion_markdown(local))
+
+    def test_notion_escaped_tilde_does_not_create_false_difference(self) -> None:
+        local = "- 점수는 0~100입니다.\n"
+        remote = "- 점수는 0\\~100입니다.\n"
+        self.assertTrue(sync.markdown_equal(local, remote))
+
+    def test_verification_failure_message_contains_markdown_diff(self) -> None:
+        message = sync.verification_failure_message(
+            "기능.md",
+            "기능",
+            "다른 기능",
+            "# 기능\n\n- local\n",
+            "# 기능\n\n- remote\n",
+        )
+        self.assertIn("제목 불일치", message)
+        self.assertIn("--- local", message)
+        self.assertIn("+++ notion", message)
+        self.assertIn("- local", message)
+        self.assertIn("+- remote", message)
+
     def test_title_and_template_validate(self) -> None:
         path = Path("이메일 인증 기능.md")
         self.assertEqual("이메일 인증 기능", sync.validate_markdown(path, VALID_MARKDOWN))

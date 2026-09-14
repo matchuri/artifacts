@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "specs" / ".notion-sync.json"
 REQUIRED_HEADINGS = ("## 설명", "## 수용 기준", "## 엣지케이스", "## 참고")
 SIMILAR_TITLE_THRESHOLD = 0.88
+MAX_VERIFICATION_DIFF_LINES = 80
 
 
 class SyncError(RuntimeError):
@@ -180,16 +181,119 @@ def normalize_markdown(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
 
 
+def _backtick_fence_marker(line: str) -> str | None:
+    stripped = line.lstrip()
+    if not stripped.startswith("```"):
+        return None
+    size = len(stripped) - len(stripped.lstrip("`"))
+    return "`" * size
+
+
+def _escape_notion_literal_tildes(line: str) -> str:
+    escaped: list[str] = []
+    inline_code_ticks: int | None = None
+    index = 0
+
+    while index < len(line):
+        character = line[index]
+        if character == "\\":
+            escaped.append(character)
+            if index + 1 < len(line):
+                escaped.append(line[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+
+        if character == "`":
+            run_end = index
+            while run_end < len(line) and line[run_end] == "`":
+                run_end += 1
+            tick_count = run_end - index
+            escaped.append(line[index:run_end])
+            if inline_code_ticks is None:
+                inline_code_ticks = tick_count
+            elif inline_code_ticks == tick_count:
+                inline_code_ticks = None
+            index = run_end
+            continue
+
+        if character == "~" and inline_code_ticks is None:
+            run_end = index
+            while run_end < len(line) and line[run_end] == "~":
+                run_end += 1
+            tilde_count = run_end - index
+            escaped.append("\\~" if tilde_count == 1 else line[index:run_end])
+            index = run_end
+            continue
+
+        escaped.append(character)
+        index += 1
+
+    return "".join(escaped)
+
+
+def to_notion_markdown(value: str) -> str:
+    """Convert repository Markdown into stable Notion-flavored Markdown."""
+    converted: list[str] = []
+    active_fence: str | None = None
+
+    for line in normalize_markdown(value).splitlines():
+        fence_marker = _backtick_fence_marker(line)
+        if fence_marker:
+            if active_fence is None:
+                active_fence = fence_marker
+            elif len(fence_marker) >= len(active_fence):
+                active_fence = None
+            converted.append(line)
+            continue
+
+        converted.append(line if active_fence else _escape_notion_literal_tildes(line))
+
+    return "\n".join(converted).strip() + "\n"
+
+
 def comparison_lines(value: str) -> list[str]:
     return [
         line.expandtabs(2).rstrip()
-        for line in normalize_markdown(value).splitlines()
+        for line in to_notion_markdown(value).splitlines()
         if line.strip() and line.strip() != "<empty-block/>"
     ]
 
 
 def markdown_equal(left: str, right: str) -> bool:
     return comparison_lines(left) == comparison_lines(right)
+
+
+def markdown_diff(left: str, right: str) -> str:
+    lines = list(
+        difflib.unified_diff(
+            comparison_lines(left),
+            comparison_lines(right),
+            fromfile="local",
+            tofile="notion",
+            lineterm="",
+        )
+    )
+    if len(lines) > MAX_VERIFICATION_DIFF_LINES:
+        omitted = len(lines) - MAX_VERIFICATION_DIFF_LINES
+        lines = lines[:MAX_VERIFICATION_DIFF_LINES] + [f"... diff {omitted}줄 생략"]
+    return "\n".join(lines)
+
+
+def verification_failure_message(
+    relative_path: str,
+    expected_title: str,
+    actual_title: str,
+    expected_markdown: str,
+    actual_markdown: str,
+) -> str:
+    details = [f"Notion 반영 검증에 실패했습니다: {relative_path}"]
+    if actual_title != expected_title:
+        details.append(f"제목 불일치: local={expected_title!r}, notion={actual_title!r}")
+    if not markdown_equal(expected_markdown, actual_markdown):
+        details.extend(("본문 불일치:", markdown_diff(expected_markdown, actual_markdown)))
+    return "\n".join(details)
 
 
 def title_from_markdown(path: Path, markdown: str) -> str:
@@ -395,6 +499,7 @@ def run_remote(
     for path, title in validated.items():
         relative_path = path.relative_to(specs_dir).as_posix()
         local = path.read_text(encoding="utf-8")
+        notion_local = to_notion_markdown(local)
         page_id, remote, remote_title = find_page(client, config, relative_path, title)
         candidates = similar_pages(client, config, title) if page_id is None else []
         if command == "plan":
@@ -418,7 +523,7 @@ def run_remote(
                 names = ", ".join(candidate["title"] for candidate in candidates)
                 raise SyncError(f"유사한 Notion 페이지가 있어 자동 생성을 중단했습니다: {title} -> {names}")
             page_id = client.create_page(
-                config["data_source_id"], config["title_property"], title, normalize_markdown(local)
+                config["data_source_id"], config["title_property"], title, notion_local
             )
             status = "created"
         else:
@@ -427,7 +532,7 @@ def run_remote(
             if title_changed:
                 client.update_title(page_id, config["title_property"], title)
             if content_changed:
-                client.replace_markdown(page_id, normalize_markdown(local))
+                client.replace_markdown(page_id, notion_local)
             if title_changed and content_changed:
                 status = "renamed_and_updated"
             elif title_changed:
@@ -437,11 +542,18 @@ def run_remote(
             else:
                 status = "unchanged"
         verified_page = client.retrieve_page(page_id)
-        verified = markdown_equal(client.retrieve_markdown(page_id), local) and page_title(
-            verified_page, config["title_property"]
-        ) == title
-        if not verified:
-            raise SyncError(f"Notion 반영 검증에 실패했습니다: {relative_path}")
+        verified_markdown = client.retrieve_markdown(page_id)
+        verified_title = page_title(verified_page, config["title_property"])
+        if not markdown_equal(verified_markdown, local) or verified_title != title:
+            raise SyncError(
+                verification_failure_message(
+                    relative_path,
+                    title,
+                    verified_title,
+                    local,
+                    verified_markdown,
+                )
+            )
         changes += status != "unchanged"
         results.append({"spec": relative_path, "status": status, "verified": True})
 
