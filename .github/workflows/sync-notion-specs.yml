@@ -35,17 +35,8 @@ jobs:
         run: python scripts/sync_notion_specs.py validate
       - name: Run sync tests
         run: python -m unittest discover -s tests -p "test_*.py"
-
-  sync:
-    if: github.event_name != 'pull_request'
-    needs: validate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Sync feature specs
+        if: github.event_name != 'pull_request'
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
         run: python scripts/sync_notion_specs.py sync

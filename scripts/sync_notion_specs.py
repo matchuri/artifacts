@@ -541,9 +541,17 @@ def run_remote(
                 status = "updated"
             else:
                 status = "unchanged"
-        verified_page = client.retrieve_page(page_id)
-        verified_markdown = client.retrieve_markdown(page_id)
-        verified_title = page_title(verified_page, config["title_property"])
+        if status in ("created", "renamed", "renamed_and_updated"):
+            verified_page = client.retrieve_page(page_id)
+            verified_title = page_title(verified_page, config["title_property"])
+        else:
+            verified_title = remote_title
+
+        if status in ("created", "updated", "renamed_and_updated"):
+            verified_markdown = client.retrieve_markdown(page_id)
+        else:
+            verified_markdown = remote
+
         if not markdown_equal(verified_markdown, local) or verified_title != title:
             raise SyncError(
                 verification_failure_message(

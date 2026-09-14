@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import importlib.util
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -31,6 +33,39 @@ VALID_MARKDOWN = """# 이메일 인증 기능
 
 - 참고
 """
+
+
+class RecordingNotionClient:
+    def __init__(self, title: str, markdown: str) -> None:
+        self.title = title
+        self.markdown = markdown
+        self.calls: list[str] = []
+
+    def retrieve_data_source(self, data_source_id: str) -> dict:
+        self.calls.append("retrieve_data_source")
+        return {"properties": {"이름": {"type": "title"}}}
+
+    def retrieve_page(self, page_id: str) -> dict:
+        self.calls.append("retrieve_page")
+        return {
+            "properties": {
+                "이름": {
+                    "title": [{"plain_text": self.title}],
+                }
+            }
+        }
+
+    def retrieve_markdown(self, page_id: str) -> str:
+        self.calls.append("retrieve_markdown")
+        return self.markdown
+
+    def replace_markdown(self, page_id: str, markdown: str) -> None:
+        self.calls.append("replace_markdown")
+        self.markdown = markdown
+
+    def update_title(self, page_id: str, title_property: str, title: str) -> None:
+        self.calls.append("update_title")
+        self.title = title
 
 
 class MarkdownTests(unittest.TestCase):
@@ -79,6 +114,47 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("+++ notion", message)
         self.assertIn("- local", message)
         self.assertIn("+- remote", message)
+
+    def test_sync_does_not_retrieve_unchanged_page_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            specs_dir = Path(directory)
+            path = specs_dir / "이메일 인증 기능.md"
+            path.write_text(VALID_MARKDOWN, encoding="utf-8")
+            client = RecordingNotionClient("이메일 인증 기능", VALID_MARKDOWN)
+            config = {
+                "data_source_id": "data-source",
+                "title_property": "이름",
+                "mappings": {path.name: {"page_id": "page-id"}},
+            }
+
+            with redirect_stdout(io.StringIO()):
+                sync.run_remote("sync", client, config, specs_dir, {path: "이메일 인증 기능"})
+
+            self.assertEqual(1, client.calls.count("retrieve_page"))
+            self.assertEqual(1, client.calls.count("retrieve_markdown"))
+            self.assertNotIn("replace_markdown", client.calls)
+
+    def test_sync_rechecks_only_markdown_after_content_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            specs_dir = Path(directory)
+            path = specs_dir / "이메일 인증 기능.md"
+            path.write_text(VALID_MARKDOWN, encoding="utf-8")
+            client = RecordingNotionClient(
+                "이메일 인증 기능",
+                VALID_MARKDOWN.replace("- 설명", "- 이전 설명"),
+            )
+            config = {
+                "data_source_id": "data-source",
+                "title_property": "이름",
+                "mappings": {path.name: {"page_id": "page-id"}},
+            }
+
+            with redirect_stdout(io.StringIO()):
+                sync.run_remote("sync", client, config, specs_dir, {path: "이메일 인증 기능"})
+
+            self.assertEqual(1, client.calls.count("retrieve_page"))
+            self.assertEqual(2, client.calls.count("retrieve_markdown"))
+            self.assertEqual(1, client.calls.count("replace_markdown"))
 
     def test_title_and_template_validate(self) -> None:
         path = Path("이메일 인증 기능.md")
